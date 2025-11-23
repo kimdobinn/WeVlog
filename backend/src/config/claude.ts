@@ -41,7 +41,7 @@ export async function generateShotList(sessionData: SessionData) {
     ]
     Make the shot list realistic, organized by location flow, and match the requested duration.`;
     const response = await anthropic.messages.create({
-        model: "claude-3-7-sonnet-20250219",
+        model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
         messages: [
             {
