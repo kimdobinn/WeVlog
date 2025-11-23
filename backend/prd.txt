@@ -1,0 +1,392 @@
+# Product Requirements Document: AI-Powered Conversational Shot List Generator
+
+## Overview
+Build a conversational AI-powered video shot list generation system that helps users plan their vlogs by creating detailed, personalized shot lists. The system allows users to provide initial video details, optionally answer clarifying questions, and receive a comprehensive shot list. During filming, users can mark shots as complete and dynamically replan if circumstances change.
+
+## Core Features
+
+### 1. Session Creation & Input Collection
+Users provide initial video details through a structured form:
+
+**Required Fields:**
+- Video Type (e.g., "Day in a life", "Travel vlog", "Morning routine")
+- Duration (e.g., "5 minutes", "10 minutes")
+- Location Flow (e.g., "Bed → Bathroom → Kitchen → Bus → School")
+
+**Optional Fields:**
+- Target Vibe/Mood (e.g., "Energetic and upbeat", "Calm and relaxing")
+- Equipment Available (e.g., "iPhone with gimbal", "DSLR + tripod")
+- Key Moments to Capture (e.g., "Morning coffee ritual, bus ride with friends")
+- Additional Details (free text)
+
+### 2. Conversational Enhancement (Optional)
+After initial submission, users can choose:
+- "Let's talk!" - AI asks 3-5 clarifying questions for personalization
+- "Leave it up to WeVlog" - Generate immediately with provided details
+
+If user chooses "Let's talk", Claude generates contextual questions based on the video type and user inputs, then incorporates answers into the final shot list.
+
+### 3. AI Shot List Generation
+Generate a comprehensive, structured shot list using Claude API with the following details per shot:
+- Shot number
+- Location
+- Title
+- Description
+- Duration (estimated seconds)
+- Shot type (Wide, Medium, Close-up, etc.)
+- Camera movement (Static, Pan, Tilt, Handheld, etc.)
+- Equipment recommendations
+- Filming tips
+- Status (pending, completed, skipped)
+
+### 4. Progress Tracking
+Users can mark individual shots as completed or skipped during filming. The system tracks:
+- Total shots
+- Completed shots
+- Pending shots
+- Skipped shots
+- Current progress percentage
+
+### 5. Dynamic Replanning
+When plans change during filming, users can request a replan:
+- Describe what changed (e.g., "Skipped the bus, walked through park instead")
+- System regenerates all remaining shots using Claude API
+- Incorporates completed shots as context
+- Accounts for changes in the new plan
+- Updates shot numbers and total count as needed
+
+## Technical Requirements
+
+### Authentication
+- All endpoints require user authentication
+- Users must be logged in to create sessions or generate shot lists
+
+### Database Schema
+
+**video_plan_sessions table:**
+- id (uuid, primary key)
+- user_id (uuid, foreign key to auth.users)
+- video_type (text)
+- duration (text)
+- location_flow (text)
+- target_vibe (text, nullable)
+- equipment (text, nullable)
+- key_moments (text, nullable)
+- additional_details (text, nullable)
+- status (enum: awaiting_choice, gathering_info, active, completed)
+- created_at (timestamp)
+- updated_at (timestamp)
+
+**ai_questions table:**
+- id (uuid, primary key)
+- session_id (uuid, foreign key)
+- question_text (text)
+- question_order (integer)
+- created_at (timestamp)
+
+**user_answers table:**
+- id (uuid, primary key)
+- session_id (uuid, foreign key)
+- question_id (uuid, foreign key)
+- answer_text (text)
+- created_at (timestamp)
+
+**shots table:**
+- id (uuid, primary key)
+- session_id (uuid, foreign key)
+- shot_number (integer)
+- location (text)
+- title (text)
+- description (text)
+- duration (text)
+- shot_type (text)
+- camera_movement (text)
+- equipment (text, nullable)
+- tips (text, nullable)
+- status (enum: pending, completed, skipped)
+- created_at (timestamp)
+- updated_at (timestamp)
+
+### API Endpoints
+
+**POST /api/video-plan/sessions**
+- Create new video planning session
+- Input: All video details from structured form
+- Output: sessionId, status, message
+- Auth: Required
+
+**POST /api/video-plan/sessions/:sessionId/questions**
+- Request AI-generated clarifying questions
+- Input: sessionId
+- Output: Array of questions with IDs
+- Auth: Required
+
+**POST /api/video-plan/sessions/:sessionId/generate**
+- Generate shot list (with or without Q&A)
+- Input: sessionId, optional answers array or skipQuestions flag
+- Output: Complete shot list with all details
+- Auth: Required
+
+**PATCH /api/video-plan/shots/:shotId/complete**
+- Mark individual shot as completed or skipped
+- Input: shotId, status (completed/skipped)
+- Output: Updated shot, next pending shot
+- Auth: Required
+
+**POST /api/video-plan/sessions/:sessionId/replan**
+- Regenerate remaining shots after plans change
+- Input: sessionId, changeDescription, currentShotId
+- Output: Updated shot list for remaining shots
+- Auth: Required
+
+**GET /api/video-plan/sessions/:sessionId**
+- Retrieve session details and progress
+- Input: sessionId
+- Output: Full session data, all shots, progress stats
+- Auth: Required
+
+### Claude API Integration
+
+**Setup:**
+- Add ANTHROPIC_API_KEY to .env
+- Install @anthropic-ai/sdk package
+- Create src/config/claude.ts for client configuration
+
+**Prompt Templates:**
+
+**Question Generation Prompt:**
+Generate 3-5 clarifying questions based on video type, duration, location flow, and other provided details. Questions should help personalize the shot list. Return as JSON array.
+
+**Shot List Generation Prompt:**
+Create detailed shot list based on all provided information (initial inputs + optional Q&A). Group shots by location according to location flow. Ensure shots total to approximate the specified duration. Return as structured JSON with all required fields per shot.
+
+**Replanning Prompt:**
+User has completed shots 1-N. Plans changed: [change description]. Regenerate remaining shots (N+1 onwards) accounting for this change while maintaining continuity with completed shots. Return as structured JSON.
+
+## Success Criteria
+- Users can create sessions and provide video details
+- AI generates relevant clarifying questions based on context
+- Shot lists are comprehensive, actionable, and match user specifications
+- Users can track filming progress shot-by-shot
+- Dynamic replanning produces coherent updated shot lists
+- All data persists correctly in Supabase
+- API responses are fast (< 5 seconds for AI calls)
+
+## Out of Scope for MVP
+- Rate limiting (will implement post-MVP)
+- Caching common video types (will implement post-MVP)
+- Notification system for shot reminders
+- Video upload and storage
+- Multi-user collaboration on shot lists
+- Shot list templates library
+
+## Technology Stack
+- Backend: Node.js + Express + TypeScript
+- Database: Supabase (PostgreSQL)
+- AI: Claude API (Anthropic)
+- Authentication: Supabase Auth
+
+---
+
+# IMPLEMENTATION TASK BREAKDOWN (15 Tasks)
+
+## Phase 1: Database Setup
+
+### Task 1: Create Supabase Database Tables
+**Description:** Set up all required database tables in Supabase
+**Steps:**
+- Create `video_plan_sessions` table with fields: id, user_id, video_type, duration, location_flow, target_vibe, equipment, key_moments, additional_details, status, created_at, updated_at
+- Create `ai_questions` table with fields: id, session_id, question_text, question_order, created_at
+- Create `user_answers` table with fields: id, session_id, question_id, answer_text, created_at
+- Create `shots` table with fields: id, session_id, shot_number, location, title, description, duration, shot_type, camera_movement, equipment, tips, status, created_at, updated_at
+- Set up foreign key relationships (session_id → video_plan_sessions.id, user_id → auth.users, etc.)
+- Add indexes for performance (session_id, user_id, shot_number)
+
+### Task 2: Set up Row Level Security (RLS) Policies
+**Description:** Implement security policies to ensure users can only access their own data
+**Steps:**
+- Enable RLS on all tables
+- Create policy: Users can SELECT their own sessions (user_id = auth.uid())
+- Create policy: Users can INSERT their own sessions
+- Create policy: Users can UPDATE their own sessions
+- Create policy: Users can SELECT/INSERT/UPDATE questions for their sessions
+- Create policy: Users can SELECT/INSERT/UPDATE answers for their sessions
+- Create policy: Users can SELECT/INSERT/UPDATE shots for their sessions
+- Test policies with different user accounts
+
+---
+
+## Phase 2: Claude API Configuration
+
+### Task 3: Configure Claude API Client
+**Description:** Set up Anthropic Claude SDK and create helper functions
+**Steps:**
+- Run `npm install @anthropic-ai/sdk`
+- Create `src/config/claude.ts`
+- Import Anthropic SDK
+- Initialize client with `process.env.ANTHROPIC_API_KEY`
+- Create `generateQuestions(sessionData)` function that builds prompt and calls Claude
+- Create `generateShotList(sessionData, answers?)` function with comprehensive prompt
+- Create `replanShots(completedShots, changeDescription, remainingContext)` function
+- Export all helper functions
+
+---
+
+## Phase 3: Video Plan Routes Implementation
+
+### Task 4: Create Video Plan Router & Session Creation Endpoint
+**Description:** Set up the video plan router and implement session creation
+**Steps:**
+- Create `src/routes/videoPlan.ts`
+- Import Router from express
+- Import supabase client
+- Create router instance
+- Implement `POST /sessions` endpoint
+- Validate required fields (videoType, duration, locationFlow)
+- Extract user_id from authenticated request
+- Insert session into `video_plan_sessions` table with status 'awaiting_choice'
+- Return response: `{ sessionId, message: "Would you like to provide more details?", status: "awaiting_choice" }`
+
+### Task 5: Implement Question Generation Endpoint
+**Description:** Generate AI clarifying questions based on user inputs
+**Steps:**
+- Implement `POST /sessions/:sessionId/questions`
+- Fetch session data from database using sessionId
+- Verify session belongs to authenticated user
+- Call `generateQuestions()` helper with session data
+- Parse Claude's response (expect JSON array of questions)
+- Store each question in `ai_questions` table with session_id and order
+- Update session status to 'gathering_info'
+- Return questions array: `{ questions: [{ id, text, order }] }`
+
+### Task 6: Implement Shot List Generation Endpoint
+**Description:** Generate comprehensive shot list using Claude API
+**Steps:**
+- Implement `POST /sessions/:sessionId/generate`
+- Handle request body: `{ answers?: [], skipQuestions?: boolean }`
+- Fetch session data
+- If answers provided, fetch and store in `user_answers` table
+- Build context: session data + answers (if any)
+- Call `generateShotList()` helper with full context
+- Parse Claude's JSON response (array of shots)
+- Validate shot structure
+- Insert all shots into `shots` table with status 'pending'
+- Update session status to 'active'
+- Return complete shot list: `{ shotList: [...], totalShots, estimatedDuration }`
+
+### Task 7: Implement Shot Completion Endpoint
+**Description:** Allow users to mark shots as completed or skipped
+**Steps:**
+- Implement `PATCH /shots/:shotId/complete`
+- Validate shotId exists and belongs to user's session
+- Update shot status to 'completed' or 'skipped' based on request
+- Fetch next pending shot from same session (ORDER BY shot_number)
+- Calculate progress stats (completed count, total count, percentage)
+- Return: `{ shotId, status, nextShot: {...}, progress: {...} }`
+
+### Task 8: Implement Dynamic Replanning Endpoint
+**Description:** Regenerate remaining shots when plans change
+**Steps:**
+- Implement `POST /sessions/:sessionId/replan`
+- Request body: `{ changeDescription, currentShotId }`
+- Fetch all shots for session
+- Identify completed shots (status = 'completed' or 'skipped')
+- Identify pending shots
+- Build context: completed shots + change description
+- Call `replanShots()` helper
+- Parse new shots from Claude response
+- Delete all pending shots from database
+- Insert new regenerated shots with updated shot numbers
+- Return: `{ message, updatedShots: [...], totalShots }`
+
+### Task 9: Implement Session Retrieval Endpoint
+**Description:** Get full session status and details
+**Steps:**
+- Implement `GET /sessions/:sessionId`
+- Verify session belongs to authenticated user
+- Fetch session data
+- Fetch all shots for session (ORDER BY shot_number)
+- Calculate progress: completed count, pending count, skipped count, total, percentage
+- Return: `{ session: {...}, shots: [...], progress: {...} }`
+
+---
+
+## Phase 4: Integration & Middleware
+
+### Task 10: Add Authentication Middleware
+**Description:** Protect video plan routes with authentication
+**Steps:**
+- Create `src/middleware/auth.ts`
+- Import supabase client
+- Create `requireAuth` middleware function
+- Extract Authorization header (Bearer token)
+- Call `supabase.auth.getUser(token)` to verify
+- If invalid, return 401 Unauthorized
+- If valid, attach `user` to `req` object
+- Export middleware
+
+### Task 11: Connect Video Plan Routes to Main App
+**Description:** Integrate video plan router into main Express app
+**Steps:**
+- Open `src/index.ts`
+- Import videoPlan router
+- Import auth middleware
+- Add line: `app.use('/api/video-plan', requireAuth, videoPlanRoutes)`
+- Ensure it's placed after `express.json()` middleware
+- Verify route order is correct
+
+---
+
+## Phase 5: Testing & Refinement
+
+### Task 12: Test Session Creation & Question Flow
+**Description:** Validate session and question generation works
+**Steps:**
+- Use curl or Postman to test `POST /api/video-plan/sessions`
+- Test with required fields only
+- Test with all optional fields
+- Verify session stored in database
+- Test `POST /sessions/:sessionId/questions`
+- Verify questions generated make sense for the video type
+- Verify questions stored in database
+- Test with invalid sessionId (should fail)
+- Test without authentication (should fail 401)
+
+### Task 13: Test Shot List Generation
+**Description:** Validate shot list generation with and without Q&A
+**Steps:**
+- Test `POST /sessions/:sessionId/generate` with skipQuestions: true
+- Verify shot list is comprehensive and well-structured
+- Test with answered questions
+- Compare quality with vs without answers
+- Test different video types (Day in life, Travel, Morning routine)
+- Test different location flows
+- Verify shots grouped by location correctly
+- Verify all shot fields populated (title, description, tips, etc.)
+- Verify shots stored in database with correct session_id
+
+### Task 14: Test Progress Tracking & Replanning
+**Description:** Validate shot completion and dynamic replanning
+**Steps:**
+- Generate a shot list
+- Test `PATCH /shots/:shotId/complete` with status 'completed'
+- Verify shot status updated
+- Verify next shot returned
+- Complete several shots in sequence
+- Test `POST /sessions/:sessionId/replan` with change description
+- Verify remaining shots regenerated intelligently
+- Verify completed shots remain unchanged
+- Test edge cases: replan after first shot, replan after all but one shot
+- Verify shot numbers update correctly
+
+### Task 15: End-to-End Integration Testing
+**Description:** Complete workflow testing and error handling
+**Steps:**
+- Full workflow test: Create session → Request questions → Answer → Generate → Film (mark complete) → Replan
+- Test as multiple different users (verify RLS works)
+- Test error scenarios: invalid sessionId, missing required fields, malformed requests
+- Test authentication failures (missing token, invalid token, expired token)
+- Test with various edge cases: very long location flows, unusual video types
+- Verify all database constraints work (foreign keys, not null, etc.)
+- Test concurrent requests (two users, same time)
+- Document any issues found and fixes applied
