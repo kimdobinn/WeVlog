@@ -38,6 +38,82 @@ router.post('/sessions', requireAuth, async (req, res) => {
     }
 });
 
+// List all sessions for the logged-in user
+router.get('/sessions', requireAuth, async (req, res) => {
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        const { data: sessions, error } = await authClient
+            .from('video_plan_sessions')
+            .select('id, video_type, duration, location_flow, status, created_at')
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            return res.status(500).json({ error: 'Failed to fetch sessions' });
+        }
+
+        const formatted = sessions?.map(s => ({
+            id: s.id,
+            videoType: s.video_type,
+            duration: s.duration,
+            locationFlow: s.location_flow,
+            status: s.status,
+            createdAt: s.created_at
+        })) || [];
+
+        return res.status(200).json({
+            sessions: formatted,
+            total: formatted.length
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to fetch sessions' });
+    }
+});
+
+// Get a single session with all its shots
+router.get('/sessions/:sessionId', requireAuth, async (req, res) => {
+    const { sessionId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        const { data: session, error: sessionError } = await authClient
+            .from('video_plan_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        const { data: shots, error: shotsError } = await authClient
+            .from('shots')
+            .select('*')
+            .eq('session_id', sessionId)
+            .order('shot_number', { ascending: true });
+
+        return res.status(200).json({
+            session: {
+                id: session.id,
+                videoType: session.video_type,
+                duration: session.duration,
+                locationFlow: session.location_flow,
+                targetVibe: session.target_vibe,
+                equipment: session.equipment,
+                keyMoments: session.key_moments,
+                status: session.status,
+                createdAt: session.created_at
+            },
+            shots: shots || [],
+            totalShots: shots?.length || 0
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to fetch session' });
+    }
+});
+
 //takes that table data and sends to to the LLM (claude)
 //takes session data from database, sends to Claude LLM, saves generated shots back to database
 router.post('/sessions/:sessionId/generate', requireAuth, async (req, res) => {
@@ -253,6 +329,46 @@ router.post('/sessions/:sessionId/answers', requireAuth, async (req, res) => {
         });
     } catch (error: any) {
         return res.status(500).json({ error: error.message || 'Failed to process answers' });
+    }
+});
+
+// Mark a shot as complete or pending (toggle)
+router.patch('/shots/:shotId/complete', requireAuth, async (req, res) => {
+    const { shotId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        // Get current shot status
+        const { data: shot, error: fetchError } = await authClient
+            .from('shots')
+            .select('id, status, session_id')
+            .eq('id', shotId)
+            .single();
+
+        if (fetchError || !shot) {
+            return res.status(404).json({ error: 'Shot not found' });
+        }
+
+        // Toggle status
+        const newStatus = shot.status === 'completed' ? 'pending' : 'completed';
+
+        const { error: updateError } = await authClient
+            .from('shots')
+            .update({ status: newStatus })
+            .eq('id', shotId);
+
+        if (updateError) {
+            return res.status(500).json({ error: 'Failed to update shot status' });
+        }
+
+        return res.status(200).json({
+            shotId: shot.id,
+            status: newStatus,
+            message: `Shot marked as ${newStatus}`
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to update shot' });
     }
 });
 
