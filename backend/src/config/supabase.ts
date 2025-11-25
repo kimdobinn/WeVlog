@@ -8,3 +8,14 @@ if (!supabaseUrl || !supabaseKey) {
   }
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Create authenticated client with user's token for RLS
+export function getAuthenticatedClient(accessToken: string) {
+    return createClient(supabaseUrl!, supabaseKey!, {
+        global: {
+            headers: {
+                Authorization: `Bearer ${accessToken}`
+            }
+        }
+    });
+}

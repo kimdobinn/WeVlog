@@ -1,14 +1,15 @@
 import {Router} from 'express';
-import {supabase} from '../config/supabase';
-import { generateShotList } from '../config/claude';
+import {supabase, getAuthenticatedClient} from '../config/supabase';
+import { generateShotList, generateQuestions } from '../config/claude';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
 //when the frontend calls the endpoint (with necessary data collected), this endpoint saves the data into a table (in a format that we want)
-router.post('/sessions', async (req, res) => {
+router.post('/sessions', requireAuth, async (req, res) => {
     const{videoType, duration, locationFlow, targetVibe, equipment, keyMoments, additionalDetails} = req.body;
     try{
-        const userId = 'dc6a8bb2-1a7b-4563-a2ac-b8d6092eaa93';
+        const userId = (req as any).user.id;
         const{data, error} = await supabase
         .from('video_plan_sessions')
         .insert({
@@ -39,7 +40,7 @@ router.post('/sessions', async (req, res) => {
 
 //takes that table data and sends to to the LLM (claude)
 //takes session data from database, sends to Claude LLM, saves generated shots back to database
-router.post('/sessions/:sessionId/generate', async (req, res) => {
+router.post('/sessions/:sessionId/generate', requireAuth, async (req, res) => {
     const{sessionId} = req.params;
     try{
         const{data: session, error: fetchError} = await supabase
@@ -93,5 +94,166 @@ router.post('/sessions/:sessionId/generate', async (req, res) => {
         return res.status(500).json({error: error.message || 'Failed to generate shot list'});
     }
 });
-export default router;
 
+// "Let's talk!" flow - generates personalized questions for the user
+router.post('/sessions/:sessionId/questions', requireAuth, async (req, res) => {
+    const { sessionId } = req.params;
+    try {
+        const { data: session, error: fetchError } = await supabase
+            .from('video_plan_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .single();
+
+        if (fetchError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        const sessionData = {
+            videoType: session.video_type,
+            duration: session.duration,
+            locationFlow: session.location_flow,
+            targetVibe: session.target_vibe,
+            equipment: session.equipment,
+            keyMoments: session.key_moments
+        };
+
+        const questions = await generateQuestions(sessionData);
+
+        const questionsToInsert = questions.map((q: any, index: number) => ({
+            session_id: sessionId,
+            question_text: q.question,
+            question_order: index + 1
+        }));
+
+        const { error: insertError } = await supabase
+            .from('ai_questions')
+            .insert(questionsToInsert);
+
+        if (insertError) {
+            return res.status(500).json({ error: 'Failed to save questions' });
+        }
+
+        await supabase
+            .from('video_plan_sessions')
+            .update({ status: 'gathering_info' })
+            .eq('id', sessionId);
+
+        return res.status(200).json({
+            questions: questions,
+            totalQuestions: questions.length,
+            message: 'Questions generated successfully'
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to generate questions' });
+    }
+});
+
+// Submit answers and generate personalized shot list
+router.post('/sessions/:sessionId/answers', requireAuth, async (req, res) => {
+    const { sessionId } = req.params;
+    const { answers } = req.body; // expects array of { questionId, answerText }
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        // 1. Fetch session data
+        const { data: session, error: sessionError } = await authClient
+            .from('video_plan_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // 2. Fetch questions for this session
+        const { data: questions, error: questionsError } = await authClient
+            .from('ai_questions')
+            .select('*')
+            .eq('session_id', sessionId)
+            .order('question_order', { ascending: true });
+
+        if (questionsError || !questions) {
+            return res.status(404).json({ error: 'Questions not found for this session' });
+        }
+
+        // 3. Save answers to user_answers table
+        const answersToInsert = answers.map((a: any) => ({
+            session_id: sessionId,
+            question_id: a.questionId,
+            answer_text: a.answerText
+        }));
+
+        const { error: insertError } = await authClient
+            .from('user_answers')
+            .insert(answersToInsert);
+
+        if (insertError) {
+            return res.status(500).json({ error: 'Failed to save answers' });
+        }
+
+        // 4. Build Q&A context for Claude
+        const qaContext = answers.map((a: any) => {
+            const question = questions.find((q: any) => q.id === a.questionId);
+            return {
+                question: question?.question_text || '',
+                answer: a.answerText
+            };
+        });
+
+        // 5. Build session data
+        const sessionData = {
+            videoType: session.video_type,
+            duration: session.duration,
+            locationFlow: session.location_flow,
+            targetVibe: session.target_vibe,
+            equipment: session.equipment,
+            keyMoments: session.key_moments,
+            additionalDetails: session.additional_details
+        };
+
+        // 6. Generate shots with Q&A context
+        const shots = await generateShotList(sessionData, qaContext);
+
+        // 7. Save shots to database
+        const shotsToInsert = shots.map((shot: any) => ({
+            session_id: sessionId,
+            shot_number: shot.shotNumber,
+            location: shot.location,
+            title: shot.title,
+            description: shot.description,
+            duration: shot.duration,
+            shot_type: shot.shotType,
+            camera_movement: shot.cameraMovement,
+            equipment: shot.equipment,
+            tips: shot.tips,
+            status: 'pending'
+        }));
+
+        const { error: shotsError } = await authClient
+            .from('shots')
+            .insert(shotsToInsert);
+
+        if (shotsError) {
+            return res.status(500).json({ error: 'Failed to save shots' });
+        }
+
+        // 8. Update session status
+        await authClient
+            .from('video_plan_sessions')
+            .update({ status: 'active' })
+            .eq('id', sessionId);
+
+        return res.status(200).json({
+            shotList: shots,
+            totalShots: shots.length,
+            message: 'Answers saved and shot list generated successfully'
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to process answers' });
+    }
+});
+
+export default router;

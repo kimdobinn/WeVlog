@@ -2,6 +2,9 @@
 .mcp.json
 .claude/
 
+# Project context (local development notes)
+PROJECT_CONTEXT.md
+
 # Environment variables (CRITICAL - contains API keys!)
 **/.env
 .env
