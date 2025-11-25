@@ -121,4 +121,76 @@ export async function generateQuestions(sessionData: SessionData) {
     return questions;
 }
 
-//replanShots()
+interface Shot {
+    shotNumber: number;
+    location: string;
+    title: string;
+    description: string;
+    duration: string;
+    shotType: string;
+    cameraMovement: string;
+    equipment: string;
+    tips: string;
+    status: string;
+}
+
+export async function replanShots(sessionData: SessionData, currentShots: Shot[], feedback: string) {
+    const shotsContext = currentShots.map(s =>
+        `  ${s.shotNumber}. [${s.status.toUpperCase()}] ${s.title} (${s.location}) - ${s.description}`
+    ).join('\n');
+
+    const prompt =
+    `You are a professional video planning assistant. The user has an existing shot list but needs it modified based on their feedback.
+
+    Video Details:
+    - Type: ${sessionData.videoType}
+    - Duration: ${sessionData.duration}
+    - Location Flow: ${sessionData.locationFlow}
+    ${sessionData.targetVibe ? `- Target Vibe: ${sessionData.targetVibe}` : ''}
+    ${sessionData.equipment ? `- Equipment: ${sessionData.equipment}` : ''}
+
+    Current Shot List:
+${shotsContext}
+
+    User Feedback: "${feedback}"
+
+    Based on the feedback, generate a revised shot list. Keep shots that are working well (especially completed ones), modify or replace problematic shots, and ensure the total still matches the video duration.
+
+    Return ONLY valid JSON (no markdown, no explanation) in this exact format:
+    [
+        {
+            "shotNumber": 1,
+            "location": "Bedroom",
+            "title": "Alarm going off",
+            "description": "Close-up of phone alarm, hand reaching to turn it off",
+            "duration": "5 seconds",
+            "shotType": "Close-up",
+            "cameraMovement": "Static",
+            "equipment": "iPhone handheld",
+            "tips": "Use natural window light"
+        }
+    ]`;
+
+    const response = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 4096,
+        messages: [
+            {
+                role: 'user',
+                content: prompt
+            }
+        ]
+    });
+
+    const textContent = (response.content[0] as any).text;
+    if (!textContent) {
+        throw new Error('No response from Claude API');
+    }
+
+    const shots = JSON.parse(textContent);
+    if (!Array.isArray(shots)) {
+        throw new Error('Invalid response format: expected array of shots');
+    }
+
+    return shots;
+}

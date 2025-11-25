@@ -1,6 +1,6 @@
 import {Router} from 'express';
 import {supabase, getAuthenticatedClient} from '../config/supabase';
-import { generateShotList, generateQuestions } from '../config/claude';
+import { generateShotList, generateQuestions, replanShots } from '../config/claude';
 import { requireAuth } from '../middleware/auth';
 
 const router = Router();
@@ -8,9 +8,11 @@ const router = Router();
 //when the frontend calls the endpoint (with necessary data collected), this endpoint saves the data into a table (in a format that we want)
 router.post('/sessions', requireAuth, async (req, res) => {
     const{videoType, duration, locationFlow, targetVibe, equipment, keyMoments, additionalDetails} = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
     try{
         const userId = (req as any).user.id;
-        const{data, error} = await supabase
+        const{data, error} = await authClient
         .from('video_plan_sessions')
         .insert({
             user_id: userId,
@@ -118,8 +120,10 @@ router.get('/sessions/:sessionId', requireAuth, async (req, res) => {
 //takes session data from database, sends to Claude LLM, saves generated shots back to database
 router.post('/sessions/:sessionId/generate', requireAuth, async (req, res) => {
     const{sessionId} = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
     try{
-        const{data: session, error: fetchError} = await supabase
+        const{data: session, error: fetchError} = await authClient
         .from('video_plan_sessions')
         .select('*')
         .eq('id', sessionId)
@@ -151,13 +155,13 @@ router.post('/sessions/:sessionId/generate', requireAuth, async (req, res) => {
             tips: shot.tips,
             status: 'pending'
         }));
-        const{error: insertError} = await supabase
+        const{error: insertError} = await authClient
         .from('shots')
         .insert(shotsToInsert);
         if(insertError){
             return res.status(500).json({error: 'Failed to save shots'});
         }
-        await supabase
+        await authClient
         .from('video_plan_sessions')
         .update({status: 'active'})
         .eq('id', sessionId);
@@ -174,8 +178,10 @@ router.post('/sessions/:sessionId/generate', requireAuth, async (req, res) => {
 // "Let's talk!" flow - generates personalized questions for the user
 router.post('/sessions/:sessionId/questions', requireAuth, async (req, res) => {
     const { sessionId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
     try {
-        const { data: session, error: fetchError } = await supabase
+        const { data: session, error: fetchError } = await authClient
             .from('video_plan_sessions')
             .select('*')
             .eq('id', sessionId)
@@ -202,7 +208,7 @@ router.post('/sessions/:sessionId/questions', requireAuth, async (req, res) => {
             question_order: index + 1
         }));
 
-        const { error: insertError } = await supabase
+        const { error: insertError } = await authClient
             .from('ai_questions')
             .insert(questionsToInsert);
 
@@ -210,7 +216,7 @@ router.post('/sessions/:sessionId/questions', requireAuth, async (req, res) => {
             return res.status(500).json({ error: 'Failed to save questions' });
         }
 
-        await supabase
+        await authClient
             .from('video_plan_sessions')
             .update({ status: 'gathering_info' })
             .eq('id', sessionId);
@@ -369,6 +375,142 @@ router.patch('/shots/:shotId/complete', requireAuth, async (req, res) => {
         });
     } catch (error: any) {
         return res.status(500).json({ error: error.message || 'Failed to update shot' });
+    }
+});
+
+// Replan shots based on user feedback
+router.post('/sessions/:sessionId/replan', requireAuth, async (req, res) => {
+    const { sessionId } = req.params;
+    const { feedback } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    if (!feedback) {
+        return res.status(400).json({ error: 'Feedback is required' });
+    }
+
+    try {
+        // 1. Get session
+        const { data: session, error: sessionError } = await authClient
+            .from('video_plan_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // 2. Get current shots
+        const { data: currentShots, error: shotsError } = await authClient
+            .from('shots')
+            .select('*')
+            .eq('session_id', sessionId)
+            .order('shot_number', { ascending: true });
+
+        if (shotsError || !currentShots || currentShots.length === 0) {
+            return res.status(404).json({ error: 'No shots found for this session' });
+        }
+
+        // 3. Build session data and shots for Claude
+        const sessionData = {
+            videoType: session.video_type,
+            duration: session.duration,
+            locationFlow: session.location_flow,
+            targetVibe: session.target_vibe,
+            equipment: session.equipment
+        };
+
+        const shotsForReplan = currentShots.map((s: any) => ({
+            shotNumber: s.shot_number,
+            location: s.location,
+            title: s.title,
+            description: s.description,
+            duration: s.duration,
+            shotType: s.shot_type,
+            cameraMovement: s.camera_movement,
+            equipment: s.equipment,
+            tips: s.tips,
+            status: s.status
+        }));
+
+        // 4. Call Claude for replanning
+        const newShots = await replanShots(sessionData, shotsForReplan, feedback);
+
+        // 5. Delete old shots
+        await authClient
+            .from('shots')
+            .delete()
+            .eq('session_id', sessionId);
+
+        // 6. Insert new shots
+        const shotsToInsert = newShots.map((shot: any) => ({
+            session_id: sessionId,
+            shot_number: shot.shotNumber,
+            location: shot.location,
+            title: shot.title,
+            description: shot.description,
+            duration: shot.duration,
+            shot_type: shot.shotType,
+            camera_movement: shot.cameraMovement,
+            equipment: shot.equipment,
+            tips: shot.tips,
+            status: 'pending'
+        }));
+
+        const { error: insertError } = await authClient
+            .from('shots')
+            .insert(shotsToInsert);
+
+        if (insertError) {
+            return res.status(500).json({ error: 'Failed to save new shots' });
+        }
+
+        return res.status(200).json({
+            shotList: newShots,
+            totalShots: newShots.length,
+            message: 'Shot list replanned successfully'
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to replan shots' });
+    }
+});
+
+// Delete a session and all related data
+router.delete('/sessions/:sessionId', requireAuth, async (req, res) => {
+    const { sessionId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        // Verify session exists and belongs to user
+        const { data: session, error: sessionError } = await authClient
+            .from('video_plan_sessions')
+            .select('id')
+            .eq('id', sessionId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // Delete in order: answers -> questions -> shots -> session
+        await authClient.from('user_answers').delete().eq('session_id', sessionId);
+        await authClient.from('ai_questions').delete().eq('session_id', sessionId);
+        await authClient.from('shots').delete().eq('session_id', sessionId);
+
+        const { error: deleteError } = await authClient
+            .from('video_plan_sessions')
+            .delete()
+            .eq('id', sessionId);
+
+        if (deleteError) {
+            return res.status(500).json({ error: 'Failed to delete session' });
+        }
+
+        return res.status(200).json({ message: 'Session deleted successfully' });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to delete session' });
     }
 });
 
