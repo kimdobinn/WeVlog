@@ -1,6 +1,7 @@
 import {Router} from 'express';
 import {supabase, getAuthenticatedClient} from '../config/supabase';
 import { generateShotList, generateQuestions, replanShots } from '../config/claude';
+import { getUploadUrl, getDownloadUrl, deleteFile, generateVideoKey } from '../config/s3';
 import { requireAuth } from '../middleware/auth';
 
 const router = Router();
@@ -511,6 +512,164 @@ router.delete('/sessions/:sessionId', requireAuth, async (req, res) => {
         return res.status(200).json({ message: 'Session deleted successfully' });
     } catch (error: any) {
         return res.status(500).json({ error: error.message || 'Failed to delete session' });
+    }
+});
+
+// Get presigned URL for uploading video to a shot
+router.post('/shots/:shotId/upload-url', requireAuth, async (req, res) => {
+    const { shotId } = req.params;
+    const { filename, contentType } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    if (!filename || !contentType) {
+        return res.status(400).json({ error: 'filename and contentType are required' });
+    }
+
+    try {
+        // Get shot to verify ownership and get session_id
+        const { data: shot, error: shotError } = await authClient
+            .from('shots')
+            .select('id, session_id, video_s3_key')
+            .eq('id', shotId)
+            .single();
+
+        if (shotError || !shot) {
+            return res.status(404).json({ error: 'Shot not found' });
+        }
+
+        // Generate S3 key
+        const s3Key = generateVideoKey(shot.session_id, shotId, filename);
+
+        // Get presigned upload URL
+        const uploadUrl = await getUploadUrl(s3Key, contentType);
+
+        return res.status(200).json({
+            uploadUrl,
+            s3Key,
+            expiresIn: 900
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to generate upload URL' });
+    }
+});
+
+// Confirm video upload and save S3 key to database
+router.post('/shots/:shotId/confirm-upload', requireAuth, async (req, res) => {
+    const { shotId } = req.params;
+    const { s3Key } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    if (!s3Key) {
+        return res.status(400).json({ error: 's3Key is required' });
+    }
+
+    try {
+        // Delete old video if exists
+        const { data: shot, error: fetchError } = await authClient
+            .from('shots')
+            .select('video_s3_key')
+            .eq('id', shotId)
+            .single();
+
+        if (fetchError || !shot) {
+            return res.status(404).json({ error: 'Shot not found' });
+        }
+
+        if (shot.video_s3_key) {
+            await deleteFile(shot.video_s3_key);
+        }
+
+        // Update shot with new S3 key
+        const { error: updateError } = await authClient
+            .from('shots')
+            .update({ video_s3_key: s3Key })
+            .eq('id', shotId);
+
+        if (updateError) {
+            return res.status(500).json({ error: 'Failed to save video reference' });
+        }
+
+        return res.status(200).json({
+            message: 'Video upload confirmed',
+            shotId,
+            s3Key
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to confirm upload' });
+    }
+});
+
+// Get presigned URL for viewing/downloading video
+router.get('/shots/:shotId/video-url', requireAuth, async (req, res) => {
+    const { shotId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        const { data: shot, error: shotError } = await authClient
+            .from('shots')
+            .select('video_s3_key')
+            .eq('id', shotId)
+            .single();
+
+        if (shotError || !shot) {
+            return res.status(404).json({ error: 'Shot not found' });
+        }
+
+        if (!shot.video_s3_key) {
+            return res.status(404).json({ error: 'No video uploaded for this shot' });
+        }
+
+        const videoUrl = await getDownloadUrl(shot.video_s3_key);
+
+        return res.status(200).json({
+            videoUrl,
+            expiresIn: 3600
+        });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to get video URL' });
+    }
+});
+
+// Delete video from a shot
+router.delete('/shots/:shotId/video', requireAuth, async (req, res) => {
+    const { shotId } = req.params;
+    const token = req.headers.authorization?.replace('Bearer ', '') || '';
+    const authClient = getAuthenticatedClient(token);
+
+    try {
+        const { data: shot, error: shotError } = await authClient
+            .from('shots')
+            .select('video_s3_key')
+            .eq('id', shotId)
+            .single();
+
+        if (shotError || !shot) {
+            return res.status(404).json({ error: 'Shot not found' });
+        }
+
+        if (!shot.video_s3_key) {
+            return res.status(404).json({ error: 'No video to delete' });
+        }
+
+        // Delete from S3
+        await deleteFile(shot.video_s3_key);
+
+        // Clear S3 key in database
+        const { error: updateError } = await authClient
+            .from('shots')
+            .update({ video_s3_key: null })
+            .eq('id', shotId);
+
+        if (updateError) {
+            return res.status(500).json({ error: 'Failed to update database' });
+        }
+
+        return res.status(200).json({ message: 'Video deleted successfully' });
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message || 'Failed to delete video' });
     }
 });
 

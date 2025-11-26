@@ -4,6 +4,7 @@
 
 # Project context (local development notes)
 PROJECT_CONTEXT.md
+FUTURE_FEATURES.md
 
 # Environment variables (CRITICAL - contains API keys!)
 **/.env
